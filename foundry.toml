@@ -1,0 +1,46 @@
+[profile.default]
+remappings = [
+    "@forge-std/=node_modules/forge-std/src/",
+    "@openzeppelin/=node_modules/@openzeppelin/",
+    "@balancer-labs/=node_modules/@balancer-labs/",
+]
+names = true
+sizes = true
+# auto_detect_solc = true
+src = "src"
+out = "out"
+libs = ["node_modules", "lib"]
+solc = "0.8.24"
+test = "test"
+optimizer = true
+optimizer_runs = 10000
+
+[fmt]
+bracket_spacing = true
+int_types = "long"
+line_length = 120
+multiline_func_header = "all"
+number_underscore = "thousands"
+quote_style = "double"
+tab_width = 4
+wrap_comments = true
+
+[profile.test]
+via-ir = false
+
+[invariant]
+runs = 2
+depth = 20010
+fail_on_revert = false
+
+[rpc_endpoints]
+base = "https://base-mainnet.g.alchemy.com/v2/${API_KEY_ALCHEMY}"
+base_sepolia = "https://base-sepolia.g.alchemy.com/v2/${API_KEY_ALCHEMY}"
+sepolia = "https://eth-sepolia.g.alchemy.com/v2/${API_KEY_ALCHEMY}"
+
+[etherscan]
+base = { key = "${API_KEY_BASESCAN}" }
+base_sepolia = { key = "${API_KEY_BASESCAN}" }
+sepolia = { key = "${API_KEY_ETHERSCAN}" }
+
+# See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
