@@ -17,11 +17,11 @@ contract EpochStaking is Ownable {
         uint256 epoch; // Numéro de l'époch pour laquelle l'utilisateur a staké
     }
 
-    IERC20 public stakingToken; // Token utilisé pour le staking (en verité il n'y a pas de token ERC20 pour le staking, on utilise le storage)
+    IERC20 public stakingToken; // Token utilisé pour le staking (en verité il n'y a pas de token ERC20 pour le
+        // staking, on utilise le storage)
     IERC20 public rewardToken; // Token utilisé pour les récompenses USDC
 
-    uint256 public epochDuration; // Durée de chaque époch en secondes
-    uint256 public contractStartTimestamp; // Timestamp de départ pour calculer les époques
+    uint256 public currentEpoch; // Époque actuelle
 
     mapping(uint256 epoch => bool updated) public epochUpdates; // Mapping pour suivre les mises à jour des époques
     mapping(uint256 epoch => EpochInfo) public epochStakes; // Informations sur les époques
@@ -30,11 +30,9 @@ contract EpochStaking is Ownable {
     mapping(address user => Stake unstake) public userUnstakes; // Montants prêts à être untakés par utilisateur
         // et par époch
 
-    constructor(IERC20 _stakingToken, IERC20 _rewardToken, uint256 _epochDuration) Ownable(msg.sender) {
+    constructor(IERC20 _stakingToken, IERC20 _rewardToken) Ownable(msg.sender) {
         stakingToken = _stakingToken;
         rewardToken = _rewardToken;
-        epochDuration = _epochDuration; // above 0
-        contractStartTimestamp = block.timestamp;
     }
 
     function stake(address staker, uint256 amount) external {
@@ -46,13 +44,13 @@ contract EpochStaking is Ownable {
 
         // Récupère l'époch actuelle et l'époch suivante
         // le staker ne peut stake que pour l'époch suivante
-        uint256 nextEpoch = getCurrentEpoch() + 1;
+        uint256 _currentEpoch = getCurrentEpoch();
 
         // Ajoute le montant staké de l'utilisateur pour l'époch suivante
         userStake.amount += amount;
-        userStake.epoch = nextEpoch;
+        userStake.epoch = _currentEpoch;
 
-        epochStakes[nextEpoch].totalStaked += amount;
+        epochStakes[_currentEpoch].totalStaked += amount;
 
         // Transfert des tokens de staking vers le contrat
         // stakingToken.transferFrom(staker, address(this), amount);
@@ -64,7 +62,7 @@ contract EpochStaking is Ownable {
         _update();
         Stake storage userStake = userStakes[staker];
         require(userStake.amount > 0, "user has no stake");
-        uint256 currentEpoch = getCurrentEpoch();
+        uint256 _currentEpoch = getCurrentEpoch();
 
         // on check si le user a déjà un unstake en cours
         Stake storage userUnstake = userUnstakes[staker];
@@ -74,13 +72,12 @@ contract EpochStaking is Ownable {
 
         uint256 amountToWithdraw = userStake.amount;
 
-        if (currentEpoch < userStake.epoch) {
+        if (_currentEpoch == userStake.epoch) {
             // retrait du stake
-            uint256 stakedEpoch = userStake.epoch;
-            require(stakedEpoch == currentEpoch + 1, "Can only unstake for next epoch");
             userStake.amount = 0;
             userStake.epoch = 0;
-            epochStakes[stakedEpoch].totalStaked -= amountToWithdraw; // normally should contain at least current stake
+            epochStakes[_currentEpoch].totalStaked -= amountToWithdraw; // normally should contain at least current
+                // stake
                 // amount
             stakingToken.transfer(staker, amountToWithdraw);
             // emit Unstake(msg.sender, userStake, epoch);
@@ -90,20 +87,22 @@ contract EpochStaking is Ownable {
 
         // on retire son stake pour l'epoch suivante
         userUnstake.amount += amountToWithdraw;
-        userUnstake.epoch = currentEpoch + 1;
-        epochUnstakes[currentEpoch + 1] += amountToWithdraw;
+        userUnstake.epoch = _currentEpoch;
+        epochUnstakes[_currentEpoch] += amountToWithdraw;
         // emit Unstake(msg.sender, userStake, epoch);
     }
 
     function claim(address user, uint256 epoch) public {
         _update();
         require(epochStakes[epoch].isFinalized, "Epoch not finalized by admin");
-        uint256 currentEpoch = getCurrentEpoch();
-        require(currentEpoch > epoch, "can claim only for past epochs");
+        uint256 _currentEpoch = getCurrentEpoch();
+        require(_currentEpoch > epoch, "can claim only for past epochs");
+
         Stake memory userStake = userStakes[user];
-        uint256 stakedEpoch = userStake.epoch;
         uint256 stakedAmount = userStake.amount;
         require(stakedAmount > 0, "user has no stake");
+
+        uint256 stakedEpoch = userStake.epoch;
         require(stakedEpoch <= epoch, "user has no stake for this epoch");
 
         // On determine si le user a de quoi claim
@@ -134,11 +133,11 @@ contract EpochStaking is Ownable {
 
     function withdraw(address user) external {
         _update();
-        uint256 currentEpoch = getCurrentEpoch();
+        uint256 _currentEpoch = getCurrentEpoch();
         Stake storage userStake = userStakes[user];
         Stake storage userUnstake = userUnstakes[user];
         require(userUnstake.amount >= 0, "Nothing to withdraw");
-        require(userUnstake.epoch < currentEpoch, "Can only withdraw for past epochs");
+        require(userUnstake.epoch <= _currentEpoch, "Can only withdraw for past epochs and current one");
 
         uint256 amountToWithdraw = userUnstake.amount;
 
@@ -160,42 +159,41 @@ contract EpochStaking is Ownable {
 
     function setRewards(uint256 rewardAmount) external onlyOwner {
         _update();
-        uint256 currentEpoch = getCurrentEpoch();
-        require(currentEpoch > 0, "current epoch must be greater than zero");
-        uint256 lastEpoch = currentEpoch - 1;
-        require(!epochStakes[lastEpoch].isFinalized, "Rewards already set for this epoch");
-        epochStakes[lastEpoch].rewardAmount = rewardAmount;
-        epochStakes[lastEpoch].isFinalized = true;
+        uint256 _currentEpoch = getCurrentEpoch();
+        require(!epochStakes[_currentEpoch].isFinalized, "Rewards already set for this epoch");
+        epochStakes[_currentEpoch].rewardAmount = rewardAmount;
+        epochStakes[_currentEpoch].isFinalized = true;
+        _incrementCurrentEpoch();
+        rewardToken.transferFrom(msg.sender, address(this), rewardAmount);
     }
 
     /**
      * @dev Needs to be updated on every epochs!!
      */
     function _update() private {
-        uint256 currentEpoch = getCurrentEpoch();
-        if (epochUpdates[currentEpoch]) {
+        uint256 _currentEpoch = getCurrentEpoch();
+        if (epochUpdates[_currentEpoch]) {
             return;
         }
 
-        if (currentEpoch == 0) {
-            epochUpdates[currentEpoch] = true;
+        if (_currentEpoch == 0) {
+            epochUpdates[_currentEpoch] = true;
             return;
         }
 
-        epochStakes[currentEpoch].totalStaked +=
-            (epochStakes[currentEpoch - 1].totalStaked - epochUnstakes[currentEpoch - 1]);
-        epochUpdates[currentEpoch] = true;
+        epochStakes[_currentEpoch].totalStaked +=
+            (epochStakes[_currentEpoch - 1].totalStaked - epochUnstakes[_currentEpoch - 1]);
+        epochUpdates[_currentEpoch] = true;
+    }
+
+    function _incrementCurrentEpoch() private {
+        currentEpoch++;
     }
 
     // // --- Fonctions Utilitaires pour les Époques ---
 
     // Calcule l'époch actuelle en fonction de l'epochDuration
     function getCurrentEpoch() public view returns (uint256) {
-        return (block.timestamp - contractStartTimestamp) / epochDuration + 1;
-    }
-
-    // Retourne le timestamp de début d'une époch donnée
-    function getEpochStartTimestamp(uint256 epoch) public view returns (uint256) {
-        return contractStartTimestamp + (epoch - 1) * epochDuration;
+        return currentEpoch;
     }
 }
