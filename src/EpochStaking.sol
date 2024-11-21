@@ -17,15 +17,15 @@ contract EpochStaking is Ownable {
         uint256 epoch; // Numéro de l'époch pour laquelle l'utilisateur a staké
     }
 
-    IERC20 public stakingToken;
-    IERC20 public rewardToken;
+    IERC20 public stakingToken; // Token utilisé pour le staking (en verité il n'y a pas de token ERC20 pour le staking, on utilise le storage)
+    IERC20 public rewardToken; // Token utilisé pour les récompenses USDC
 
     uint256 public epochDuration; // Durée de chaque époch en secondes
     uint256 public contractStartTimestamp; // Timestamp de départ pour calculer les époques
 
-    mapping(uint256 epoch => bool updated) public epochUpdates;
-    mapping(uint256 epoch => EpochInfo) public epochStakes;
-    mapping(uint256 epoch => uint256 amounToUnstake) public epochUnstakes;
+    mapping(uint256 epoch => bool updated) public epochUpdates; // Mapping pour suivre les mises à jour des époques
+    mapping(uint256 epoch => EpochInfo) public epochStakes; // Informations sur les époques
+    mapping(uint256 epoch => uint256 amounToUnstake) public epochUnstakes; // Montants prêts à être untakés par époch
     mapping(address user => Stake stake) public userStakes; // Montants stakés par utilisateur et par époch
     mapping(address user => Stake unstake) public userUnstakes; // Montants prêts à être untakés par utilisateur
         // et par époch
@@ -55,7 +55,7 @@ contract EpochStaking is Ownable {
         epochStakes[nextEpoch].totalStaked += amount;
 
         // Transfert des tokens de staking vers le contrat
-        stakingToken.transferFrom(staker, address(this), amount);
+        // stakingToken.transferFrom(staker, address(this), amount);
 
         // emit Stake(msg.sender, amount, nextEpoch);
     }
@@ -109,12 +109,12 @@ contract EpochStaking is Ownable {
         // On determine si le user a de quoi claim
 
         //1. on recupere le montant de staking et celui du unstaking pour le user
-        Stake memory userWithdrawal = userUnstakes[user];
-        uint256 withdrawalAmount;
-        if (userWithdrawal.epoch <= epoch) {
-            withdrawalAmount = userWithdrawal.amount;
+        Stake memory userUnstake = userUnstakes[user];
+        uint256 unstakeAmount;
+        if (userUnstake.epoch <= epoch) {
+            unstakeAmount = userUnstake.amount;
         }
-        uint256 claimedAmount = stakedAmount - withdrawalAmount;
+        uint256 claimedAmount = stakedAmount - unstakeAmount;
         require(claimedAmount > 0, "user has no claimable amount");
 
         // on calcule le reward du user
