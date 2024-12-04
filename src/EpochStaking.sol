@@ -4,8 +4,18 @@ pragma solidity ^0.8.0;
 import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { IEpochStaking } from "./interfaces/IEpochStaking.sol";
+import { console } from "@forge-std/console.sol";
 
-contract EpochStaking is Ownable {
+abstract contract EpochStaking is Ownable {
+    // errors
+    error StakingAmountIsZero();
+    error InsufficientStakingTokenBalance();
+    error UserHasNoStake();
+    error NoRewardsToClaim();
+    error RewardsAlreadySetForThisEpoch();
+    error AddressZero();
+    error NotAuthorized(address caller);
+
     struct EpochInfo {
         uint256 totalStaked; // Montant total staké dans l'époch
         uint256 rewardAmount; // Montant total des récompenses pour cette époch
@@ -15,11 +25,12 @@ contract EpochStaking is Ownable {
     struct Stake {
         uint256 amount; // Montant staké par l'utilisateur
         uint256 epoch; // Numéro de l'époch pour laquelle l'utilisateur a staké
+        bool rewardsClaimed; // Statut des récompenses de l'utilisateur (claimées ou non)
     }
 
-    IERC20 public stakingToken; // Token utilisé pour le staking (en verité il n'y a pas de token ERC20 pour le
-        // staking, on utilise le storage)
-    IERC20 public rewardToken; // Token utilisé pour les récompenses USDC
+    IERC20 public immutable rewardToken; // Token utilisé pour les récompenses USDC
+    address public immutable orchestrator; // Adresse de l'orchestrateur
+    address public immutable admin; // Adresse de l'orchestrateur
 
     uint256 public currentEpoch; // Époque actuelle
 
@@ -27,20 +38,52 @@ contract EpochStaking is Ownable {
     mapping(uint256 epoch => EpochInfo) public epochStakes; // Informations sur les époques
     mapping(uint256 epoch => uint256 amounToUnstake) public epochUnstakes; // Montants prêts à être untakés par époch
     mapping(address user => Stake stake) public userStakes; // Montants stakés par utilisateur et par époch
-    mapping(address user => Stake unstake) public userUnstakes; // Montants prêts à être untakés par utilisateur
         // et par époch
+    mapping(address user => uint256 rewards) public pendingRewards; // Récompenses en attente pour les utilisateurs
+    mapping(address user => uint256 epoch) public lastClaimEpoch; // Dernière époch pour laquelle l'utilisateur a
+        // réclamé des récompenses
 
-    constructor(IERC20 _stakingToken, IERC20 _rewardToken) Ownable(msg.sender) {
-        stakingToken = _stakingToken;
-        rewardToken = _rewardToken;
+    constructor(address _rewardToken, address _cs) Ownable(msg.sender) {
+        if (_rewardToken == address(0)) revert AddressZero();
+        if (_cs == address(0)) revert AddressZero();
+        rewardToken = IERC20(_rewardToken);
+        admin = _cs;
     }
 
-    function stake(address staker, uint256 amount) external {
+    modifier onlyCS() {
+        if (msg.sender != admin) revert NotAuthorized(msg.sender);
+        _;
+    }
+
+    function claim(address user) public {
+        _updateUser(user);
+        uint256 _pendingRewards = pendingRewards[user];
+        if (_pendingRewards == 0) {
+            revert("No rewards to claim");
+        }
+        uint256 _currentEpoch = getCurrentEpoch();
+        lastClaimEpoch[user] = _currentEpoch - 1; // we set the last claim epoch to the previous one
+        pendingRewards[user] = 0;
+        rewardToken.transfer(msg.sender, _pendingRewards);
+
+        // emit Claim(msg.sender, userReward, _currentEpoch - 1);
+    }
+
+    function setRewards(uint256 rewardAmount) external onlyCS {
         _update();
-        require(amount > 0, "Stake amount must be greater than zero");
-        require(stakingToken.balanceOf(staker) >= amount, "Insufficient staking token balance");
+        uint256 _currentEpoch = getCurrentEpoch();
+        require(!epochStakes[_currentEpoch].isFinalized, "Rewards already set for this epoch");
+        epochStakes[_currentEpoch].rewardAmount = rewardAmount;
+        epochStakes[_currentEpoch].isFinalized = true;
+        _incrementCurrentEpoch();
+        _update();
+        rewardToken.transferFrom(msg.sender, address(this), rewardAmount);
+    }
+
+    function _stake(address staker, uint256 amount) internal {
+        if (amount == 0) revert StakingAmountIsZero();
+        _updateUser(staker);
         Stake storage userStake = userStakes[staker];
-        require(userStake.amount == 0, "User already has a stake");
 
         // Récupère l'époch actuelle et l'époch suivante
         // le staker ne peut stake que pour l'époch suivante
@@ -58,113 +101,23 @@ contract EpochStaking is Ownable {
         // emit Stake(msg.sender, amount, nextEpoch);
     }
 
-    function unstake(address staker) external {
-        _update();
+    function _unstake(address staker) internal returns (uint256) {
+        _updateUser(staker);
         Stake storage userStake = userStakes[staker];
-        require(userStake.amount > 0, "user has no stake");
-        uint256 _currentEpoch = getCurrentEpoch();
-
-        // on check si le user a déjà un unstake en cours
-        Stake storage userUnstake = userUnstakes[staker];
-
-        // si le montant de unstake est egal au montant de stake alors rien à unstake
-        require(userUnstake.amount < userStake.amount, "Nothing to unstake");
-
-        uint256 amountToWithdraw = userStake.amount;
-
-        if (_currentEpoch == userStake.epoch) {
-            // retrait du stake
-            userStake.amount = 0;
-            userStake.epoch = 0;
-            epochStakes[_currentEpoch].totalStaked -= amountToWithdraw; // normally should contain at least current
-                // stake
-                // amount
-            stakingToken.transfer(staker, amountToWithdraw);
-            // emit Unstake(msg.sender, userStake, epoch);
-            // emit Withdraw(staker, amountToWithdraw, stakedEpoch);
-            return;
-        }
-
-        // on retire son stake pour l'epoch suivante
-        userUnstake.amount += amountToWithdraw;
-        userUnstake.epoch = _currentEpoch;
-        epochUnstakes[_currentEpoch] += amountToWithdraw;
-        // emit Unstake(msg.sender, userStake, epoch);
-    }
-
-    function claim(address user, uint256 epoch) public {
-        _update();
-        require(epochStakes[epoch].isFinalized, "Epoch not finalized by admin");
-        uint256 _currentEpoch = getCurrentEpoch();
-        require(_currentEpoch > epoch, "can claim only for past epochs");
-
-        Stake memory userStake = userStakes[user];
         uint256 stakedAmount = userStake.amount;
+        // we need to check if the user has a stake
         require(stakedAmount > 0, "user has no stake");
 
-        uint256 stakedEpoch = userStake.epoch;
-        require(stakedEpoch <= epoch, "user has no stake for this epoch");
-
-        // On determine si le user a de quoi claim
-
-        //1. on recupere le montant de staking et celui du unstaking pour le user
-        Stake memory userUnstake = userUnstakes[user];
-        uint256 unstakeAmount;
-        if (userUnstake.epoch <= epoch) {
-            unstakeAmount = userUnstake.amount;
-        }
-        uint256 claimedAmount = stakedAmount - unstakeAmount;
-        require(claimedAmount > 0, "user has no claimable amount");
-
-        // on calcule le reward du user
-
-        uint256 rewardAmount = epochStakes[epoch].rewardAmount;
-        uint256 totalStaked = epochStakes[epoch].totalStaked - epochUnstakes[epoch];
-
-        // Calcul des récompenses en fonction de la part de l'utilisateur
-        // faire une fonction pour le calcul avec le scale des decimals et du wad operation
-        uint256 userRewards = (userStake.amount * rewardAmount) / totalStaked;
-
-        // Transfert des récompenses à l'utilisateur
-        rewardToken.transfer(msg.sender, userRewards);
-
-        // emit Claim(msg.sender, userReward, epoch);
-    }
-
-    function withdraw(address user) external {
-        _update();
+        // we get the current epoch
         uint256 _currentEpoch = getCurrentEpoch();
-        Stake storage userStake = userStakes[user];
-        Stake storage userUnstake = userUnstakes[user];
-        require(userUnstake.amount >= 0, "Nothing to withdraw");
-        require(userUnstake.epoch <= _currentEpoch, "Can only withdraw for past epochs and current one");
 
-        uint256 amountToWithdraw = userUnstake.amount;
+        // retrait du stake
+        userStake.amount = 0;
+        userStake.epoch = 0;
+        epochUnstakes[_currentEpoch] += stakedAmount;
+        // emit Unstake(msg.sender, userStake, epoch);
 
-        // on update le montant staked du user
-        userStake.amount -= amountToWithdraw;
-        // if (userStakes[user].amount == userWithdrawal.amount) {
-        //     userStakes[user].epoch = 0;
-        // }
-
-        // on update le montant de unstake
-        userUnstake.amount = 0;
-        userUnstake.epoch = 0;
-
-        // Transfère les tokens de staking à l'utilisateur
-        stakingToken.transfer(msg.sender, amountToWithdraw);
-
-        // emit Withdrawn(user, amountToWithdraw);
-    }
-
-    function setRewards(uint256 rewardAmount) external onlyOwner {
-        _update();
-        uint256 _currentEpoch = getCurrentEpoch();
-        require(!epochStakes[_currentEpoch].isFinalized, "Rewards already set for this epoch");
-        epochStakes[_currentEpoch].rewardAmount = rewardAmount;
-        epochStakes[_currentEpoch].isFinalized = true;
-        _incrementCurrentEpoch();
-        rewardToken.transferFrom(msg.sender, address(this), rewardAmount);
+        return stakedAmount;
     }
 
     /**
@@ -181,9 +134,41 @@ contract EpochStaking is Ownable {
             return;
         }
 
+        console.log("Updating epoch %s", epochStakes[_currentEpoch - 1].totalStaked);
+
         epochStakes[_currentEpoch].totalStaked +=
             (epochStakes[_currentEpoch - 1].totalStaked - epochUnstakes[_currentEpoch - 1]);
         epochUpdates[_currentEpoch] = true;
+    }
+
+    function _updateUser(address _user) private {
+        // first we need to update the total staked amount of the contract (if not updated yet)
+        _update();
+        //we need to calculate the pending rewards on each epoch from the one
+        // he originally staked to the current epoch -1
+        uint256 _currentEpoch = getCurrentEpoch();
+        Stake memory userStake = userStakes[_user];
+        uint256 stakedAmount = userStake.amount;
+        uint256 stakedEpoch = userStake.epoch;
+
+        // !! @audit: becareful if there are too many epochs, this loop can be expensive and/or revert for gas limit
+        // reasons
+        uint256 startingClaimEpoch = lastClaimEpoch[_user] > stakedEpoch ? lastClaimEpoch[_user] : stakedEpoch;
+        for (uint256 i = startingClaimEpoch; i < _currentEpoch; i++) {
+            if (epochStakes[i].isFinalized && !userStake.rewardsClaimed) {
+                uint256 totalStaked = epochStakes[i].totalStaked;
+                // if the total staked amount is 0, we skip the epoch
+                if (totalStaked == 0) continue;
+
+                uint256 rewardAmount = epochStakes[i].rewardAmount;
+                uint256 userRewards = (stakedAmount * rewardAmount) / totalStaked; // use math lib here
+                pendingRewards[_user] += userRewards;
+                // once  the rewards are calculated, we set the rewardsClaimed to true
+                userStake.rewardsClaimed = true;
+                // potentially we can emit an event here
+                // emit RewardsCalculated(_user, userRewards, i);
+            }
+        }
     }
 
     function _incrementCurrentEpoch() private {
@@ -195,5 +180,13 @@ contract EpochStaking is Ownable {
     // Calcule l'époch actuelle en fonction de l'epochDuration
     function getCurrentEpoch() public view returns (uint256) {
         return currentEpoch;
+    }
+
+    function getUserStake(address user) public view returns (Stake memory) {
+        return userStakes[user];
+    }
+
+    function getEpochInfo(uint256 epoch) public view returns (EpochInfo memory) {
+        return epochStakes[epoch];
     }
 }
